@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import uuid
 
 from .model import Record
 from .report import AuditState
@@ -20,6 +21,11 @@ class AuditRegistry:
         with self._lock:
             self._records.append(record)
         return record
+
+    def append_by_ref(self, event: str, at: str, ref: str = "") -> Record:
+        """Append an entry that references the object the event acted on."""
+
+        return self.append(Record(id=uuid.uuid4().hex, event=event, at=at, ref=ref))
 
     def records(self) -> list[Record]:
         with self._lock:

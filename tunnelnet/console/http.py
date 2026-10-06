@@ -125,6 +125,16 @@ class Request:
             return value
         return str(value)
 
+    def bool_field(self, name: str, default: bool = False) -> bool:
+        value = self.payload.get(name, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in ("1", "true", "yes", "on")
+        if isinstance(value, (int, float)):
+            return bool(value)
+        raise RequestError(400, f"field {name} must be a boolean")
+
     def float_list(self, name: str) -> list[float]:
         value = self.payload.get(name, [])
         if value is None:

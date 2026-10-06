@@ -9,6 +9,15 @@ from .http import Request, Response, json_response
 from .runtime import Runtime
 
 
+def detector_for_zone(rt: Runtime, zone: str) -> str:
+    """Pick the detector registered for a zone, falling back to the zone id."""
+
+    for detector in rt.fire.detectors():
+        if detector.zone == zone:
+            return detector.id
+    return zone
+
+
 def run_cycle(rt: Runtime, request: Request) -> Response:
     """Walk the whole chain once, in production order."""
 
@@ -28,9 +37,14 @@ def run_cycle(rt: Runtime, request: Request) -> Response:
 
     alarmed = rt.env.sample(sensor_id, reading, at)
 
-    zones = rt.fire.activate_zones(zone)
-    rt.fire.handle_smoke(zone)
-    raised = rt.fire.raise_alarm(f"{zone}:{at}")
+    # Two reports from the same detector within the confirmation window are
+    # what confirms a fire; the cycle drives both and linkage follows on
+    # confirmation (rolled back automatically if it partially fails).
+    detector_id = detector_for_zone(rt, zone)
+    rt.fire.report_smoke(detector_id, at=at, event_key=f"{zone}:{at}:1")
+    second = rt.fire.report_smoke(detector_id, at=at, event_key=f"{zone}:{at}:2")
+    raised = second.escalated()
+    zones = rt.fire.zones() if raised else []
 
     rt.patrol.check_in(cabin_id, at)
 

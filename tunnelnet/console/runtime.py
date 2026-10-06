@@ -8,7 +8,7 @@ from tunnelnet.cabin import PartitionTable, PowerBook, Registry as CabinRegistry
 from tunnelnet.cable import CableRegistry, MovingAverage
 from tunnelnet.drain import DrainService, PumpUnit
 from tunnelnet.env import Environment
-from tunnelnet.fire import FireService
+from tunnelnet.fire import FireService, Policy
 from tunnelnet.ns import Registry as NamespaceRegistry
 from tunnelnet.patrol import PatrolService
 from tunnelnet.quota import QuotaService
@@ -17,6 +17,8 @@ from tunnelnet.vent import VentService
 
 DEFAULT_ZONES = ("zone-1", "zone-2", "zone-3")
 DEFAULT_THRESHOLD = 75.0
+DEFAULT_WINDOW_SECONDS = 30.0
+DEFAULT_REQUIRED_REPORTS = 2
 
 
 class Runtime:
@@ -36,8 +38,17 @@ class Runtime:
         self.ventilation = VentService()
         self.suppression = SuppressionLog()
         self.dedupe = MarkSet()
-        self.fire = FireService(store, self.ventilation, self.suppression, self.dedupe, DEFAULT_ZONES)
+        self.audit = AuditRegistry()
+        self.fire = FireService.with_outputs(
+            store,
+            store,
+            self.ventilation,
+            self.suppression,
+            DEFAULT_ZONES,
+            audit=self.audit,
+            policy=Policy(DEFAULT_WINDOW_SECONDS, DEFAULT_REQUIRED_REPORTS),
+            deduper=self.dedupe,
+        )
         self.patrol = PatrolService(self.cabins)
         self.power_book = PowerBook()
         self.quota = QuotaService(self.cabins, self.power_book)
-        self.audit = AuditRegistry()

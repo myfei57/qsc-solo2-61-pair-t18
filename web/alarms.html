@@ -15,16 +15,29 @@ ul { line-height: 1.7; }
 <h1>Alarms</h1>
 <p id="summary"></p>
 <h2>Fire linkage</h2>
+<p id="policy"></p>
+<h3>Confirmed alarms</h3>
 <ul id="fire"></ul>
+<h3>Suspected (inside confirmation window)</h3>
+<ul id="suspected"></ul>
 <h2>Environment</h2>
 <ul id="env"></ul>
 <script>
 async function load() {
-  const fire = await (await fetch("/api/fire/report")).json();
+  const [fire, cases] = await Promise.all([
+    (await fetch("/api/fire/report")).json(),
+    (await fetch("/api/fire/alarms")).json(),
+  ]);
   document.getElementById("summary").textContent =
-    `Detectors ${fire.detector_count}, zones ${fire.zone_count}, alarms ${fire.alarm_count}`;
+    `Detectors ${fire.detector_count}, zones ${fire.zone_count}, alarms ${fire.alarm_count}, suspected ${fire.suspected_count}`;
+  document.getElementById("policy").textContent =
+    `Confirmation window ${fire.policy.window_seconds}s, ${fire.policy.required_reports} reports confirm; expiry ${fire.policy.expiry}`;
   document.getElementById("fire").innerHTML =
-    fire.alarms.map((key) => `<li>${key}</li>`).join("");
+    fire.alarms.map((key) => `<li>${key}</li>`).join("") || "<li>none</li>";
+  document.getElementById("suspected").innerHTML =
+    cases.suspected
+      .map((c) => `<li>${c.detector_id}: ${c.report_count} report(s), expires ${c.expires_at}</li>`)
+      .join("") || "<li>none</li>";
   const environment = await (await fetch("/api/env")).json();
   document.getElementById("env").innerHTML =
     environment.alarms.map((alarm) => `<li>${alarm.sensor_id}: ${alarm.value}</li>`).join("");

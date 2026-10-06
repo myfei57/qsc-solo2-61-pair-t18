@@ -61,6 +61,7 @@ from tunnelnet.env import (
 from tunnelnet.fire import (
     Detector,
     FireService,
+    Policy,
     activation_order,
     adjacent_zones,
 )
@@ -456,13 +457,23 @@ class VentCase(unittest.TestCase):
 
 
 class FireCase(unittest.TestCase):
-    def test_detectors_dampers_and_alarms(self) -> None:
+    def _service(self, tmp: str, window: float = 30.0, reports: int = 2):
+        store = Store.open(tmp)
+        vent = VentService()
+        suppression = SuppressionLog()
+        fire = FireService.with_outputs(
+            store,
+            store,
+            vent,
+            suppression,
+            ("zone-1", "zone-2", "zone-3"),
+            policy=Policy(window, reports),
+        )
+        return fire, store, vent, suppression
+
+    def test_confirmation_window_single_report_is_suspected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            store = Store.open(tmp)
-            vent = VentService()
-            suppression = SuppressionLog()
-            marks = MarkSet()
-            fire = FireService(store, vent, suppression, marks, ("zone-1", "zone-2", "zone-3"))
+            fire, store, vent, _ = self._service(tmp)
             fire.add_detector(Detector(id="detector-1", zone="zone-1"))
             fire.add_detector(Detector(id="detector-2", zone="zone-2"))
             self.assertEqual(fire.detector_count(), 2)
@@ -471,22 +482,194 @@ class FireCase(unittest.TestCase):
             self.assertEqual(fire.zones(), ["zone-1", "zone-2", "zone-3"])
             self.assertEqual(fire.zone_count(), 3)
 
-            self.assertTrue(fire.detect("detector-1"))
+            first = fire.report_smoke("detector-1", at="t0", event_key="e1")
+            self.assertEqual(first.after.value, "suspected")
+            self.assertEqual(first.before.value, "none")
+            self.assertEqual(fire.alarm_count(), 0)
+            self.assertEqual(len(fire.suspected()), 1)
+            # suspicion alone moves nothing physical
+            self.assertTrue(vent.running())
+            self.assertIsNone(store.load("damper", "zone-1"))
+            self.assertIn("suspected=1", fire.describe())
+
+    def test_repeated_report_within_window_confirms_and_links(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fire, store, vent, suppression = self._service(tmp)
+            fire.add_detector(Detector(id="detector-1", zone="zone-1"))
+
+            fire.report_smoke("detector-1", at="t0", event_key="e1")
+            second = fire.report_smoke("detector-1", at="t10", event_key="e2")
+            self.assertTrue(second.escalated())
+            self.assertEqual(second.after.value, "alarm")
+            self.assertEqual(fire.alarm_count(), 1)
             self.assertFalse(vent.running())
             self.assertEqual(store.load("damper", "zone-1")["closed"], True)
+            self.assertEqual(suppression.zones(), ["zone-1", "zone-2", "zone-3"])
+            self.assertEqual(fire.report().as_dict()["alarm_count"], 1)
+            self.assertEqual(fire.report().as_dict()["suspected_count"], 0)
 
             order = fire.activate_zones("zone-2")
             self.assertEqual(order, ["zone-2", "zone-1", "zone-3"])
-            self.assertEqual(suppression.zones(), ["zone-2", "zone-1", "zone-3"])
 
-            self.assertTrue(fire.raise_alarm("event-1"))
-            self.assertFalse(fire.raise_alarm("event-1"))
-            self.assertEqual(fire.alarms(), ["event-1"])
+    def test_duplicate_report_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fire, _, vent, suppression = self._service(tmp)
+            fire.add_detector(Detector(id="detector-1", zone="zone-1"))
+            fire.report_smoke("detector-1", at="t0", event_key="e1")
+            fire.report_smoke("detector-1", at="t10", event_key="e2")
+            replay = fire.report_smoke("detector-1", at="t10", event_key="e2")
+            self.assertFalse(replay.changed())
             self.assertEqual(fire.alarm_count(), 1)
             self.assertEqual(fire.distinct_alarms(), 1)
-            self.assertEqual(fire.report().as_dict()["alarm_count"], 1)
+            # the escalation linkage ran exactly once
+            active = [entry for entry in suppression.entries() if entry.active]
+            self.assertEqual(active, suppression.entries())
+            decisions = fire.decisions()
+            self.assertEqual([d.trigger.value for d in decisions], ["report", "confirm"])
+
+    def test_restore_within_window_withdraws_suspicion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fire, _, _, _ = self._service(tmp)
+            fire.add_detector(Detector(id="detector-1", zone="zone-1"))
+            fire.report_smoke("detector-1", at="t0", event_key="e1")
+            withdrawn = fire.restore("detector-1", at="t5", event_key="e2")
+            self.assertEqual(withdrawn.after.value, "none")
+            self.assertEqual(withdrawn.trigger.value, "restore")
+            self.assertEqual(fire.cases(), [])
+            self.assertEqual(fire.suspected(), [])
+
+    def test_expired_suspicion_is_auto_withdrawn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fire, _, _, _ = self._service(tmp)
+            fire.add_detector(Detector(id="detector-1", zone="zone-1"))
+            fire.report_smoke("detector-1", at="t0", event_key="e1")
+            # a report after the window starts a fresh suspicion, never confirms
+            second = fire.report_smoke("detector-1", at="t40", event_key="e2")
+            self.assertEqual(second.after.value, "suspected")
+            self.assertEqual(second.report_count, 1)
+            self.assertEqual(fire.alarm_count(), 0)
+            swept = fire.sweep(at="t71")
+            self.assertEqual(len(swept), 1)
+            self.assertEqual(swept[0].trigger.value, "expire")
+            self.assertEqual(fire.cases(), [])
+
+    def test_alarm_does_not_expire_but_resets_and_rolls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fire, _, vent, suppression = self._service(tmp)
+            fire.add_detector(Detector(id="detector-1", zone="zone-1"))
+            fire.report_smoke("detector-1", at="t0", event_key="e1")
+            fire.report_smoke("detector-1", at="t5", event_key="e2")
+            self.assertEqual(fire.sweep(at="t999"), [])
+            self.assertEqual(fire.alarm_count(), 1)
+            reset = fire.reset_alarm("detector-1", at="t100")
+            self.assertEqual(reset.after.value, "none")
+            self.assertTrue(vent.running())
+            self.assertEqual(fire.alarm_count(), 0)
+            self.assertTrue(any(not entry.active for entry in suppression.entries()))
+            kinds = {record.kind for record in fire.linkage_records()}
+            self.assertEqual(kinds, {"escalate", "reset"})
             self.assertEqual(fire.clear_alarms(), 0)
-            self.assertIn("detectors=2", fire.describe())
+
+    def test_linkage_failure_rolls_back_partial_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(tmp)
+
+            class FlakyVent:
+                def __init__(self) -> None:
+                    self.running = True
+
+                def stop(self) -> bool:
+                    self.running = False
+                    raise RuntimeError("vent bus down")
+
+                def start(self) -> bool:
+                    self.running = True
+                    return True
+
+            vent = FlakyVent()
+            suppression = SuppressionLog()
+            fire = FireService.with_outputs(
+                store, store, vent, suppression, ("zone-1", "zone-2"), policy=Policy(30.0, 2)
+            )
+            fire.add_detector(Detector(id="detector-1", zone="zone-1"))
+            fire.report_smoke("detector-1", at="t0", event_key="e1")
+            with self.assertRaises(Exception):
+                fire.report_smoke("detector-1", at="t5", event_key="e2")
+            # damper closed before the vent failure must be reopened
+            self.assertEqual(store.load("damper", "zone-1")["closed"], False)
+            self.assertEqual(len(fire.suspected()), 1)
+            self.assertEqual(fire.alarm_count(), 0)
+
+            # once the vent recovers, the same report replays and confirms
+            class HealthyVent:
+                def __init__(self) -> None:
+                    self.running = True
+
+                def stop(self) -> bool:
+                    self.running = False
+                    return False
+
+                def start(self) -> bool:
+                    self.running = True
+                    return True
+
+            healthy = HealthyVent()
+            fire._linkage = fire._linkage.__class__(store, healthy, suppression, ("zone-1", "zone-2"))
+            retried = fire.report_smoke("detector-1", at="t6", event_key="e2")
+            self.assertEqual(retried.after.value, "alarm")
+            self.assertFalse(healthy.running)
+            self.assertEqual(fire.alarm_count(), 1)
+
+    def test_effective_linkage_records_are_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fire, _, _, _ = self._service(tmp)
+            fire.add_detector(Detector(id="detector-1", zone="zone-1"))
+            fire.report_smoke("detector-1", at="t0", event_key="e1")
+            fire.report_smoke("detector-1", at="t5", event_key="e2")
+            [record] = [item for item in fire.linkage_records() if item.kind == "escalate"]
+            with self.assertRaises(ValueError):
+                from tunnelnet.fire import save_linkage
+
+                save_linkage(fire._store, record)
+
+    def test_suspected_and_alarm_cases_are_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fire, store, _, _ = self._service(tmp)
+            fire.add_detector(Detector(id="detector-1", zone="zone-1"))
+            fire.report_smoke("detector-1", at="t0", event_key="e1")
+            self.assertIsNotNone(store.load("fire_case", "detector-1"))
+            self.assertEqual(store.count("fire_decision"), 1)
+            fire.report_smoke("detector-1", at="t5", event_key="e2")
+            self.assertEqual(store.load("fire_case", "detector-1")["state"], "alarm")
+
+    def test_audit_references_the_persisted_decision(self) -> None:
+        from tunnelnet.audit import AuditRegistry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(tmp)
+            audit = AuditRegistry()
+            fire = FireService.with_outputs(
+                store,
+                store,
+                VentService(),
+                SuppressionLog(),
+                ("zone-1",),
+                audit=audit,
+                policy=Policy(30.0, 2),
+            )
+            fire.add_detector(Detector(id="detector-1", zone="zone-1"))
+            fire.report_smoke("detector-1", at="t0", event_key="e1")
+            fire.report_smoke("detector-1", at="t5", event_key="e2")
+
+            durable = {item.id for item in fire.decisions()}
+            refs = {entry.ref for entry in audit.records() if entry.event.startswith("fire_")}
+            self.assertTrue(refs)
+            self.assertTrue(refs <= durable)
+            # the confirmation decision is exactly what the audit entry cites
+            confirm = next(item for item in fire.decisions() if item.trigger.value == "confirm")
+            entry = next(item for item in audit.records() if item.event == "fire_alarm_confirmed")
+            self.assertEqual(entry.ref, confirm.id)
+            self.assertTrue(store.exists("fire_decision", confirm.id))
 
     def test_zone_helpers(self) -> None:
         self.assertEqual(adjacent_zones(("a", "b", "c"), "b"), ["a", "c"])
@@ -679,7 +862,10 @@ class AuditCase(unittest.TestCase):
         self.assertEqual([item.id for item in between(records, "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z")], ["a1", "a2"])
         self.assertEqual(count_by_event(records), {"access": 2, "fire": 1})
         self.assertEqual(summary(records)["total"], 3)
-        self.assertEqual(first.as_dict(), {"id": "a1", "event": "access", "at": "2026-01-01T00:00:00Z"})
+        self.assertEqual(
+            first.as_dict(),
+            {"id": "a1", "event": "access", "at": "2026-01-01T00:00:00Z", "ref": ""},
+        )
         self.assertEqual(second.as_dict()["event"], "fire")
         registry.clear()
         self.assertEqual(registry.count(), 0)

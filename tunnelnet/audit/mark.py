@@ -25,13 +25,18 @@ class MarkSet:
         with self._lock:
             return key in self._marks
 
+    def clear(self, key: str = "") -> None:
+        """Forget one key, or every key when called without one."""
+
+        with self._lock:
+            if key:
+                self._marks.discard(key)
+            else:
+                self._marks = set()
+
     def count(self) -> int:
         with self._lock:
             return len(self._marks)
-
-    def clear(self) -> None:
-        with self._lock:
-            self._marks = set()
 
     def describe(self) -> str:
         return f"marks={len(self._marks)}"

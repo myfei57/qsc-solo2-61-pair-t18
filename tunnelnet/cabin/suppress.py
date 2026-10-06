@@ -27,6 +27,13 @@ class SuppressionLog:
         self._entries.append(entry)
         return entry
 
+    def release(self, zone: str) -> Suppression:
+        """Compensating action that releases a previously suppressed zone."""
+
+        entry = Suppression(zone=zone, active=False)
+        self._entries.append(entry)
+        return entry
+
     def zones(self) -> list[str]:
         return [entry.zone for entry in self._entries]
 

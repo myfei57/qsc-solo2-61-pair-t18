@@ -462,7 +462,13 @@ def fire_zones(server: "Server", request: Request) -> Response:
 def fire_alarms(server: "Server", request: Request) -> Response:
     fire = server.runtime.fire
     return json_response(
-        {"items": fire.alarms(), "count": fire.alarm_count(), "distinct": fire.distinct_alarms()}
+        {
+            "items": fire.alarms(),
+            "count": fire.alarm_count(),
+            "distinct": fire.distinct_alarms(),
+            "suspected": [case.as_dict() for case in fire.suspected()],
+            "cases": [case.as_dict() for case in fire.cases()],
+        }
     )
 
 
@@ -482,9 +488,46 @@ def fire_detect(server: "Server", request: Request) -> Response:
     zone = fire.zone_of_detector(detector_id)
     if not zone:
         raise RequestError(404, f"detector {detector_id} not found")
-    fire.detect(detector_id)
-    record_event(server.runtime, "fire_detect", detector_id)
-    return json_response({"detector": detector_id, "zone": zone})
+    at = request.str_field("at", "")
+    event_key = request.str_field("event_key", "")
+    restored = request.bool_field("restored", False)
+    decision = fire.report_smoke(detector_id, at=at or None, event_key=event_key, restored=restored)
+    return json_response({"detector": detector_id, "zone": zone, "decision": decision.as_dict()})
+
+
+def fire_restore(server: "Server", request: Request) -> Response:
+    fire = server.runtime.fire
+    detector_id = request.str_field("detector_id")
+    if not fire.zone_of_detector(detector_id):
+        raise RequestError(404, f"detector {detector_id} not found")
+    decision = fire.restore(
+        detector_id, at=request.str_field("at", "") or None, event_key=request.str_field("event_key", "")
+    )
+    return json_response({"decision": decision.as_dict()})
+
+
+def fire_sweep(server: "Server", request: Request) -> Response:
+    decisions = server.runtime.fire.sweep(at=request.str_field("at", "") or None)
+    return json_response({"withdrawn": [item.as_dict() for item in decisions], "count": len(decisions)})
+
+
+def fire_reset(server: "Server", request: Request) -> Response:
+    fire = server.runtime.fire
+    detector_id = request.str_field("detector_id")
+    if not fire.zone_of_detector(detector_id):
+        raise RequestError(404, f"detector {detector_id} not found")
+    decision = fire.reset_alarm(detector_id, at=request.str_field("at", "") or None)
+    return json_response({"decision": decision.as_dict()})
+
+
+def fire_decisions(server: "Server", request: Request) -> Response:
+    decisions = server.runtime.fire.decisions()
+    return json_response({"items": [item.as_dict() for item in decisions], "count": len(decisions)})
+
+
+def fire_linkages(server: "Server", request: Request) -> Response:
+    records = server.runtime.fire.linkage_records()
+    return json_response({"items": [item.as_dict() for item in records], "count": len(records)})
 
 
 def fire_smoke(server: "Server", request: Request) -> Response:
