@@ -471,7 +471,8 @@ class FireCase(unittest.TestCase):
             self.assertEqual(fire.zones(), ["zone-1", "zone-2", "zone-3"])
             self.assertEqual(fire.zone_count(), 3)
 
-            self.assertTrue(fire.detect("detector-1"))
+            # Manual smoke handling (operator forced) still acts immediately.
+            self.assertTrue(fire.handle_smoke("zone-1"))
             self.assertFalse(vent.running())
             self.assertEqual(store.load("damper", "zone-1")["closed"], True)
 

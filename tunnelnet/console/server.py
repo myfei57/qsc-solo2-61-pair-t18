@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Callable, Iterable
 
+from tunnelnet.fire import PolicyConfig
 from tunnelnet.store import Store
 
 from . import handlers
@@ -18,9 +19,17 @@ from .seed import seed_defaults
 class Server:
     """Owns the runtime state and dispatches console requests."""
 
-    def __init__(self, store: Store, web_dir: str = "web") -> None:
-        self.runtime = Runtime(store)
+    def __init__(
+        self,
+        store: Store,
+        web_dir: str = "web",
+        fire_policy: PolicyConfig | None = None,
+    ) -> None:
+        self.runtime = Runtime(store, fire_policy=fire_policy)
         seed_defaults(self.runtime)
+        # Resume any linkage plan interrupted by a crash between persisting a
+        # confirmed decision and finishing the physical device calls.
+        self.runtime.fire.recover()
         self.web_dir = web_dir
         self.router = Router()
         self.metrics = Metrics()

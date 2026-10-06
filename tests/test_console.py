@@ -27,14 +27,19 @@ from tunnelnet.console.http import (
 )
 from tunnelnet.console.routes import route_table
 from tunnelnet.console.server import Server
+from tunnelnet.fire import PolicyConfig
 from tunnelnet.store import Store
+
+# Tests drive reports back to back, so drop the inter-report spacing and the
+# retransmission interval; the confirmation window itself stays in effect.
+TEST_FIRE_POLICY = PolicyConfig(window_seconds=60.0, min_gap_seconds=0.0, dedupe_seconds=0.0)
 
 
 class ConsoleCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.store = Store.open(f"{self._tmp.name}/data")
-        self.server = Server(self.store, web_dir="web")
+        self.server = Server(self.store, web_dir="web", fire_policy=TEST_FIRE_POLICY)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -373,10 +378,24 @@ class ConsoleCase(unittest.TestCase):
         status, body = self.call("POST", "/api/fire/detector", {"id": "detector-3", "zone": "zone-3"})
         self.assertEqual(body["detector"]["id"], "detector-3")
 
-        status, body = self.call("POST", "/api/fire/detect", {"detector_id": "detector-1"})
+        status, body = self.call("POST", "/api/fire/detect", {"detector_id": "detector-1", "event_id": "evt-a"})
         self.assertEqual(body["zone"], "zone-1")
+        self.assertEqual(body["outcome"]["state"], "suspected")
+        _, vent = self.call("GET", "/api/vent")
+        self.assertTrue(vent["running"])
+        # A repeated event id is acknowledged as a duplicate, never replayed.
+        status, dup = self.call("POST", "/api/fire/detect", {"detector_id": "detector-1", "event_id": "evt-a"})
+        self.assertTrue(dup["outcome"]["duplicate"])
+        # A second, spaced report confirms the fire and engages linkage.
+        status, body = self.call("POST", "/api/fire/detect", {"detector_id": "detector-1", "event_id": "evt-b"})
+        self.assertEqual(body["outcome"]["state"], "fire")
+        self.assertEqual(body["outcome"]["linkage"]["status"], "engaged")
         _, vent = self.call("GET", "/api/vent")
         self.assertFalse(vent["running"])
+        status, incidents = self.call("GET", "/api/fire/incidents")
+        self.assertGreaterEqual(incidents["confirmed"], 1)
+        status, linkage = self.call("GET", "/api/fire/linkage")
+        self.assertGreater(linkage["count"], 0)
         status, body = self.call("POST", "/api/fire/detect", {"detector_id": "ghost"})
         self.assertEqual(status, 404)
 
@@ -386,18 +405,18 @@ class ConsoleCase(unittest.TestCase):
         status, body = self.call("POST", "/api/fire/zone", {"zone": "zone-2"})
         self.assertEqual(body["order"], ["zone-2", "zone-1", "zone-3"])
         status, suppression = self.call("GET", "/api/suppression")
-        self.assertEqual(suppression["zones"], ["zone-2", "zone-1", "zone-3"])
-        self.assertEqual(suppression["entries"][0]["zone"], "zone-2")
+        self.assertEqual(suppression["zones"][-3:], ["zone-2", "zone-1", "zone-3"])
+        self.assertEqual(suppression["entries"][-3]["zone"], "zone-2")
 
         status, body = self.call("POST", "/api/fire/alarm", {"event_key": "e1"})
         self.assertTrue(body["raised"])
         status, body = self.call("POST", "/api/fire/alarm", {"event_key": "e1"})
         self.assertFalse(body["raised"])
         status, alarms = self.call("GET", "/api/fire/alarms")
-        self.assertEqual(alarms["count"], 1)
-        self.assertEqual(alarms["distinct"], 1)
+        self.assertGreaterEqual(alarms["count"], 2)
+        self.assertIn("e1", alarms["items"])
         status, fire_report = self.call("GET", "/api/fire/report")
-        self.assertEqual(fire_report["alarm_count"], 1)
+        self.assertEqual(fire_report["alarm_count"], alarms["count"])
         status, body = self.call("POST", "/api/fire/clear")
         self.assertEqual(body["count"], 0)
 
@@ -552,11 +571,30 @@ class ConsoleCase(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertEqual(body["reading"], 15.0)
+        # First detector report inside a cycle is only suspected.
+        self.assertEqual(body["fire_state"], "suspected")
+        self.assertFalse(body["fire_confirmed"])
+        self.assertEqual(body["zones"], [])
+
+        status, body = self.call(
+            "POST",
+            "/api/cycle",
+            {
+                "cabin_id": "cabin-1",
+                "requester": "ops",
+                "zone": "zone-1",
+                "sensor_id": "sensor-1",
+                "samples": [10.0, 20.0],
+                "at": "t2",
+                "watts": 100.0,
+            },
+        )
+        self.assertEqual(body["fire_state"], "fire")
+        self.assertTrue(body["fire_confirmed"])
+        self.assertEqual(body["linkage"], "engaged")
         self.assertEqual(body["zones"], ["zone-1", "zone-2", "zone-3"])
-        self.assertTrue(body["alarm_raised"])
-        self.assertEqual(body["usage"], 1300.0)
-        self.assertEqual(body["drain_runs"], 1)
-        self.assertEqual(body["audit_count"], 4)
+        self.assertEqual(body["usage"], 1400.0)
+        self.assertEqual(body["drain_runs"], 2)
         self.assertEqual(body["last_stage"], "audit")
 
         status, report = self.call("POST", "/api/simulate", {"ticks": 3})

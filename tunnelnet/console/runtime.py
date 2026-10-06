@@ -8,7 +8,7 @@ from tunnelnet.cabin import PartitionTable, PowerBook, Registry as CabinRegistry
 from tunnelnet.cable import CableRegistry, MovingAverage
 from tunnelnet.drain import DrainService, PumpUnit
 from tunnelnet.env import Environment
-from tunnelnet.fire import FireService
+from tunnelnet.fire import FireService, PolicyConfig
 from tunnelnet.ns import Registry as NamespaceRegistry
 from tunnelnet.patrol import PatrolService
 from tunnelnet.quota import QuotaService
@@ -17,12 +17,13 @@ from tunnelnet.vent import VentService
 
 DEFAULT_ZONES = ("zone-1", "zone-2", "zone-3")
 DEFAULT_THRESHOLD = 75.0
+DEFAULT_FIRE_POLICY = PolicyConfig()
 
 
 class Runtime:
     """Owns one instance of each control component for a single store."""
 
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, fire_policy: PolicyConfig | None = None) -> None:
         self.store = store
         self.namespaces = NamespaceRegistry()
         self.cabins = CabinRegistry()
@@ -36,8 +37,17 @@ class Runtime:
         self.ventilation = VentService()
         self.suppression = SuppressionLog()
         self.dedupe = MarkSet()
-        self.fire = FireService(store, self.ventilation, self.suppression, self.dedupe, DEFAULT_ZONES)
+        self.audit = AuditRegistry()
+        self.fire = FireService(
+            store,
+            self.ventilation,
+            self.suppression,
+            self.dedupe,
+            DEFAULT_ZONES,
+            store=store,
+            audit=self.audit,
+            config=fire_policy or DEFAULT_FIRE_POLICY,
+        )
         self.patrol = PatrolService(self.cabins)
         self.power_book = PowerBook()
         self.quota = QuotaService(self.cabins, self.power_book)
-        self.audit = AuditRegistry()

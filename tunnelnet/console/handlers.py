@@ -470,6 +470,22 @@ def fire_report(server: "Server", request: Request) -> Response:
     return json_response(server.runtime.fire.report().as_dict())
 
 
+def fire_incidents(server: "Server", request: Request) -> Response:
+    fire = server.runtime.fire
+    return json_response(
+        {
+            "items": [incident.as_dict() for incident in fire.incidents()],
+            "suspected": fire.suspected_points(),
+            "confirmed": len(fire.confirmed_incidents()),
+        }
+    )
+
+
+def fire_linkage(server: "Server", request: Request) -> Response:
+    records = server.runtime.fire.linkage_records()
+    return json_response({"items": [record.as_dict() for record in records], "count": len(records)})
+
+
 def fire_detector_add(server: "Server", request: Request) -> Response:
     fire = server.runtime.fire
     detector = fire.add_detector(Detector(id=request.str_field("id"), zone=request.str_field("zone")))
@@ -482,9 +498,30 @@ def fire_detect(server: "Server", request: Request) -> Response:
     zone = fire.zone_of_detector(detector_id)
     if not zone:
         raise RequestError(404, f"detector {detector_id} not found")
-    fire.detect(detector_id)
+    event_id = request.str_field("event_id", "")
+    outcome = fire.report_smoke(detector_id, event_id)
     record_event(server.runtime, "fire_detect", detector_id)
-    return json_response({"detector": detector_id, "zone": zone})
+    return json_response({"zone": zone, "outcome": outcome.as_dict()})
+
+
+def fire_restore(server: "Server", request: Request) -> Response:
+    fire = server.runtime.fire
+    detector_id = request.str_field("detector_id")
+    if not fire.zone_of_detector(detector_id):
+        raise RequestError(404, f"detector {detector_id} not found")
+    outcome = fire.report_restore(detector_id, request.str_field("event_id", ""))
+    record_event(server.runtime, "fire_restore", detector_id)
+    return json_response({"outcome": outcome.as_dict()})
+
+
+def fire_sweep(server: "Server", request: Request) -> Response:
+    decisions = server.runtime.fire.sweep_expired()
+    return json_response({"expired": [item.as_dict() for item in decisions], "count": len(decisions)})
+
+
+def fire_recover(server: "Server", request: Request) -> Response:
+    results = server.runtime.fire.recover()
+    return json_response({"plans": [item.as_dict() for item in results], "count": len(results)})
 
 
 def fire_smoke(server: "Server", request: Request) -> Response:

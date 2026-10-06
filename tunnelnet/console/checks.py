@@ -44,9 +44,14 @@ def run_checks(rt: "Runtime") -> list[dict[str, str]]:
     )
 
     alarms = rt.fire.alarm_count()
-    checks.append(
-        {"name": "fire", "status": "warn" if alarms else "ok", "detail": f"alarms={alarms}"}
-    )
+    suspected = len(rt.fire.suspected_points())
+    if alarms:
+        fire_status, detail = "warn", f"confirmed={alarms}"
+    elif suspected:
+        fire_status, detail = "warn", f"suspected={suspected}"
+    else:
+        fire_status, detail = "ok", f"alarms={alarms}"
+    checks.append({"name": "fire", "status": fire_status, "detail": detail})
 
     missed = len(rt.patrol.missed())
     checks.append(

@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
 class FireReport:
-    """Detector, alarm and zone totals for the dashboard."""
+    """Detector, incident and zone totals for the dashboard."""
 
     detector_count: int
     alarm_count: int
     zone_count: int
     alarms: list[str]
+    suspected: int = 0
+    confirmed: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -20,4 +22,6 @@ class FireReport:
             "alarm_count": self.alarm_count,
             "zone_count": self.zone_count,
             "alarms": self.alarms,
+            "suspected": self.suspected,
+            "confirmed": self.confirmed,
         }
